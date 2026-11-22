@@ -334,6 +334,13 @@ static bool SendAll(SOCKET s, const std::string &d) {
   return true;
 }
 
+void HeadsetLink::SubmitInput(const std::string &line) {
+  if (!cap_input_.load() || line.empty()) return;
+  std::lock_guard<std::mutex> g(input_m_);
+  if (input_queue_.size() >= 64) input_queue_.pop_front();
+  input_queue_.push_back(line);
+}
+
 bool HeadsetLink::Session(const Found &f) {
   state_ = kConnecting;
   addrinfo hint{}, *res = nullptr;
@@ -413,11 +420,22 @@ bool HeadsetLink::Session(const Found &f) {
       snprintf(p, sizeof p, "P %u %lld\n", ++seq, (long long)(QpcNow() * 1e9));
       if (!SendAll(s, p)) break;
     }
+    if (cap_input_.load()) {
+      std::deque<std::string> pending;
+      {
+        std::lock_guard<std::mutex> g(input_m_);
+        pending.swap(input_queue_);
+      }
+      bool send_ok = true;
+      for (auto &input : pending)
+        if (!SendAll(s, input)) { send_ok = false; break; }
+      if (!send_ok) break;
+    }
     if (now - last_rx > 10) { log_("headset: nothing received for 10 s, reconnecting"); break; }
     fd_set rf;
     FD_ZERO(&rf);
     FD_SET(s, &rf);
-    timeval t2{0, 50000};
+    timeval t2{0, cap_input_.load() ? 8000 : 50000};
     int r = select(0, &rf, nullptr, nullptr, &t2);
     if (r < 0) break;
     if (r == 0) continue;
@@ -461,6 +479,12 @@ bool HeadsetLink::Session(const Found &f) {
           }
           if (have_calib) sync_->OnLine(rx, line.c_str());
           break;
+        case 'K': {
+          unsigned acked = 0;
+          (void)acked;
+          sscanf(line.c_str(), "K %u", &acked);  // acknowledged; no log (it floods the dashboard)
+          break;
+        }
         case 'Q': {
           unsigned sq;
           long long send_ns, mono_ns;
@@ -491,9 +515,11 @@ bool HeadsetLink::Session(const Found &f) {
             fam = family_;
             fits = Fits(fam, model_);
             remembered = fits && h.rfind("H QuestLHSync ", 0) == 0;
+            cap_input_ = h.find(" cap=input1") != std::string::npos;
             if (remembered) Remember({f.ip, HeadsetId(serial_), model_, ""});
           }
-          log_(model() + ": firmware " + fw() + ", module " + field("module"));
+          log_(model() + ": firmware " + fw() + ", module " + field("module") +
+               (cap_input_ ? ", controller input" : ", no controller input"));
           if (!fits) {  // reached straight over TCP (no discovery): the address of another headset
             if (skipped_ != serial()) log_(model() + " at " + f.ip + " isn't SteamVR's headset (a " + fam + "): not used");
             skipped_ = serial();

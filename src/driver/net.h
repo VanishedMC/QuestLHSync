@@ -5,6 +5,7 @@
 //              (F frames, T heartbeats, I/W/E messages); "P <seq> <pc_ns>" -> "Q <seq> <pc_ns> <mono_ns>" round trips
 #pragma once
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -35,6 +36,8 @@ class HeadsetLink {
   void SetMemory(const std::string &path);            // the headsets' addresses, kept there: tried over TCP when
                                                       // nothing answers discovery (networks that drop broadcasts)
   State state() const { return state_; }
+  bool CapInput() const { return cap_input_; }
+  void SubmitInput(const std::string &line);  // latest X line; the session loop sends it
   std::string serial() const { std::lock_guard<std::mutex> g(m_); return serial_; }
   std::string model() const { std::lock_guard<std::mutex> g(m_); return model_; }  // "Quest Pro": what the page shows
   std::string addr() const { std::lock_guard<std::mutex> g(m_); return addr_; }
@@ -52,6 +55,9 @@ class HeadsetLink {
   std::atomic<State> state_{kIdle};
   std::atomic<double> last_frame_{0}, connected_at_{0};
   mutable std::mutex m_;
+  std::mutex input_m_;
+  std::deque<std::string> input_queue_;
+  std::atomic<bool> cap_input_{false};
   std::vector<std::string> hosts_;
   std::string preferred_, serial_, model_, addr_, fw_, mem_path_, failed_ip_, family_, streamer_, skipped_;
   std::vector<Known> known_;

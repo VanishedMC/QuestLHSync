@@ -14,6 +14,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -60,15 +62,19 @@ struct client {
   char in[1024];
   size_t ilen;
   double last_rx;
+  unsigned inputs;
 };
 static struct client cl[MAXC];
 static int ncl;
+
+static void input_status(int up);
 
 static void cl_close(int i) {
   close(cl[i].fd);
   free(cl[i].out);
   cl[i] = cl[--ncl];
   memset(&cl[ncl], 0, sizeof cl[ncl]);
+  input_status(ncl > 0);
 }
 
 static int cl_queue(struct client *c, const char *d, size_t n) {
@@ -127,7 +133,7 @@ static void device_info(void) {
 
 static int send_hello(struct client *c) {
   char h[512];
-  int n = snprintf(h, sizeof h, "H QuestLHSync 1 serial=%s model=%s fw=%s module=%s\n", serial, model, fw, MODULE_VERSION);
+  int n = snprintf(h, sizeof h, "H QuestLHSync 1 serial=%s model=%s fw=%s module=%s cap=input1\n", serial, model, fw, MODULE_VERSION);
   if (cl_queue(c, h, n)) return -1;
   char *buf = NULL, name[256] = "";
   size_t got = 0;
@@ -225,6 +231,40 @@ static void pump(void) {
   }
 }
 
+// ---------------------------------------------------------------- controller input from the PC
+// The host sends "X ..." lines; hand them to the Frame SteamVR driver over a same-user datagram
+// socket. The driver creates the socket when SteamVR starts; sends before that simply fail.
+static int input_fd = -1;
+static struct sockaddr_un input_addr;
+
+static void input_init(void) {
+  const char *rt = getenv("XDG_RUNTIME_DIR");
+  if (!rt || !*rt) return;
+  char path[256];
+  int n = snprintf(path, sizeof path, "%s/questlhsync/input.sock", rt);
+  if (n <= 0 || (size_t)n >= sizeof input_addr.sun_path) return;
+  input_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (input_fd < 0) return;
+  memset(&input_addr, 0, sizeof input_addr);
+  input_addr.sun_family = AF_UNIX;
+  memcpy(input_addr.sun_path, path, (size_t)n + 1);
+}
+
+static void input_forward(const char *line, size_t len) {
+  if (input_fd >= 0 && len)
+    sendto(input_fd, line, len, MSG_DONTWAIT | MSG_NOSIGNAL, (struct sockaddr *)&input_addr,
+           sizeof input_addr);
+}
+
+static int input_status_last = -1;
+static void input_status(int up) {
+  up = up != 0;
+  if (up == input_status_last) return;
+  input_status_last = up;
+  input_forward(up ? "G 1\n" : "G 0\n", 4);
+  logi("input link %s", up ? "up" : "down");
+}
+
 // ---------------------------------------------------------------- main
 static volatile sig_atomic_t quit;
 static void on_term(int s) { (void)s; quit = 1; }
@@ -258,6 +298,7 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_term);
   signal(SIGINT, on_term);
   device_info();
+  input_init();
   int ts = listen_tcp(), us = listen_udp();
   if (ts < 0 || us < 0) { logi("ports %d/%d busy: already running?", TCP_PORT, UDP_PORT); return 3; }
   hs_init(argc, argv);
@@ -305,6 +346,7 @@ int main(int argc, char **argv) {
           if (send_hello(c)) cl_close(ncl - 1);
           else {
             logi("client connected (%d)", ncl);
+            input_status(1);
             if (child > 0 && kill_at) logi("client back while lhsight stops: restarting it after");
             stop_at = 0;
             if (child <= 0) { failures = 0; restart_at = now; }
@@ -334,6 +376,14 @@ int main(int argc, char **argv) {
             char r[96];
             int k = snprintf(r, sizeof r, "Q %u %lld %lld\n", seq, pc, t);
             cl_queue(c, r, k);
+          } else if (c->in[s] == 'X' && c->in[s + 1] == ' ') {
+            input_forward(c->in + s, j - s);
+            if (c->inputs++ == 0) logi("controller input: %.100s", c->in + s);
+            if ((c->inputs % 25) == 0) {
+              char r[32];
+              int k = snprintf(r, sizeof r, "K %u\n", c->inputs);
+              cl_queue(c, r, k);
+            }
           }
           s = j + 1;
         }
@@ -347,6 +397,12 @@ int main(int argc, char **argv) {
     if (cpi >= 0 && (pf[cpi].revents & (POLLIN | POLLHUP))) pump();
     reap();
     for (int i = 0; i < ncl; i++) cl_flush(i);
+
+    static double last_input_hb;
+    if (now - last_input_hb >= 1.0) {
+      last_input_hb = now;
+      input_forward(ncl > 0 ? "G 1\n" : "G 0\n", 4);
+    }
 
     // lhsight runs while someone listens
     if (ncl) {

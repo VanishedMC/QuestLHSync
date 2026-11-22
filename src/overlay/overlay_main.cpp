@@ -681,6 +681,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
   g_pg = &pg;
   QlhsStatus st{}, prev{};
   ReadStatus(st);
+  int last_haptic_seq = st.haptic_seq;
   Draw(big, pg, st, false);
   HWND win = MakeWindow(inst);
   Dash dash;
@@ -741,6 +742,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         }
       }
       if (quit) break;
+    }
+    if (vr_up && st.haptic_seq != last_haptic_seq) {
+      last_haptic_seq = st.haptic_seq;
+      const auto role = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(
+          vr::TrackedControllerRole_RightHand);
+      const auto idx = (st.haptic_device > 0 &&
+                        st.haptic_device < (int32_t)vr::k_unMaxTrackedDeviceCount)
+                           ? (vr::TrackedDeviceIndex_t)st.haptic_device
+                           : role;
+      if (st.haptic_us > 0 && idx != vr::k_unTrackedDeviceIndexInvalid)
+        vr::VRSystem()->TriggerHapticPulse(idx, 0, (uint16_t)st.haptic_us);
     }
     if (st.updated != last_upd) { last_upd = st.updated; last_change = now; }
     bool stale = !have || now - last_change > 3000;

@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "openvr_driver.h"
+#include "frame_input.h"
 
 namespace {
 
@@ -174,16 +175,18 @@ class Provider : public vr::IServerTrackedDeviceProvider {
       }
     });
     Log("lending XRService's camera buffers on %s", path_.c_str());
+    input_.Start();
     return vr::VRInitError_None;
   }
   void Cleanup() override {
+    input_.Stop();
     run_ = false;
     if (th_.joinable()) th_.join();
     if (ls_ >= 0) { close(ls_); unlink(path_.c_str()); ls_ = -1; }
     VR_CLEANUP_SERVER_DRIVER_CONTEXT();
   }
   const char *const *GetInterfaceVersions() override { return vr::k_InterfaceVersions; }
-  void RunFrame() override {}
+  void RunFrame() override { input_.RunFrame(); }
   bool ShouldBlockStandbyMode() override { return false; }
   void EnterStandby() override {}
   void LeaveStandby() override {}
@@ -193,6 +196,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
   std::string path_;
   std::atomic<bool> run_{false};
   std::thread th_;
+  FrameInput input_;
 };
 
 Provider g_provider;
