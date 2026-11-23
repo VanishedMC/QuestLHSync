@@ -8,13 +8,65 @@
   "options": {},
   "bindings": {
     "/actions/lasermouse": {
+      "haptics": [
+        {
+          "output": "/actions/lasermouse/out/Haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/lasermouse/out/Haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ],
       "poses": [
+        {
+          "output": "/actions/lasermouse/in/Pointer",
+          "path": "/user/hand/left/pose/aim"
+        },
         {
           "output": "/actions/lasermouse/in/Pointer",
           "path": "/user/hand/right/pose/aim"
         }
       ],
       "sources": [
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "parameters": {
+            "click_activate_threshold": "0.5",
+            "click_deactivate_threshold": "0.45",
+            "off_haptic_amplitude": "0"
+          },
+          "inputs": {
+            "click": {
+              "output": "/actions/lasermouse/in/LeftClick"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/thumbstick",
+          "mode": "joystick",
+          "inputs": {
+            "click": {
+              "output": "/actions/lasermouse/in/MiddleClick"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trackpad",
+          "mode": "trackpad",
+          "inputs": {
+            "position": {
+              "output": "/actions/lasermouse/in/TrackpadValue"
+            },
+            "touch": {
+              "output": "/actions/lasermouse/in/TrackpadTouch"
+            },
+            "click": {
+              "output": "/actions/lasermouse/in/RightClick"
+            }
+          }
+        },
         {
           "path": "/user/hand/right/input/trigger",
           "mode": "button",
@@ -57,6 +109,21 @@
     },
     "/actions/system": {
       "sources": [
+        {
+          "path": "/user/hand/left/input/system",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/system/in/ToggleDashboard"
+            },
+            "double": {
+              "output": "/actions/system/in/ToggleRoomView"
+            },
+            "held": {
+              "output": "/actions/system/in/SystemButtonChord"
+            }
+          }
+        },
         {
           "path": "/user/hand/right/input/system",
           "mode": "button",
@@ -132,6 +199,15 @@
     },
     "/actions/lasermouse_secondary": {
       "sources": [
+        {
+          "path": "/user/hand/left/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lasermouse_secondary/in/SwitchLaserHand"
+            }
+          }
+        },
         {
           "path": "/user/hand/right/input/a",
           "mode": "button",

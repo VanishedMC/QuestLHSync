@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/un.h>
@@ -265,6 +266,30 @@ static void input_status(int up) {
   logi("input link %s", up ? "up" : "down");
 }
 
+// The Frame driver writes "V ..." haptic events to this socket; relay them to every PC client.
+static int haptic_fd = -1;
+
+static void haptic_init(void) {
+  const char *rt = getenv("XDG_RUNTIME_DIR");
+  if (!rt || !*rt) return;
+  char path[256];
+  int n = snprintf(path, sizeof path, "%s/questlhsync/haptic.sock", rt);
+  struct sockaddr_un a = {0};
+  a.sun_family = AF_UNIX;
+  if (n <= 0 || (size_t)n >= sizeof a.sun_path) return;
+  memcpy(a.sun_path, path, (size_t)n + 1);
+  haptic_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (haptic_fd < 0) return;
+  unlink(path);
+  if (bind(haptic_fd, (struct sockaddr *)&a, sizeof a) != 0) {
+    close(haptic_fd);
+    haptic_fd = -1;
+    return;
+  }
+  chmod(path, 0600);
+  fcntl(haptic_fd, F_SETFL, O_NONBLOCK);
+}
+
 // ---------------------------------------------------------------- main
 static volatile sig_atomic_t quit;
 static void on_term(int s) { (void)s; quit = 1; }
@@ -299,6 +324,7 @@ int main(int argc, char **argv) {
   signal(SIGINT, on_term);
   device_info();
   input_init();
+  haptic_init();
   int ts = listen_tcp(), us = listen_udp();
   if (ts < 0 || us < 0) { logi("ports %d/%d busy: already running?", TCP_PORT, UDP_PORT); return 3; }
   hs_init(argc, argv);
@@ -397,6 +423,15 @@ int main(int argc, char **argv) {
     if (cpi >= 0 && (pf[cpi].revents & (POLLIN | POLLHUP))) pump();
     reap();
     for (int i = 0; i < ncl; i++) cl_flush(i);
+
+    if (haptic_fd >= 0) {
+      char b[256];
+      for (;;) {
+        ssize_t n = recv(haptic_fd, b, sizeof b, 0);
+        if (n <= 0) break;
+        broadcast(b, (size_t)n);
+      }
+    }
 
     static double last_input_hb;
     if (now - last_input_hb >= 1.0) {

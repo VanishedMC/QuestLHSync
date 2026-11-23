@@ -48,8 +48,8 @@ struct LighthouseInput::Impl {
   std::map<uint64_t, Comp> comps;
   std::map<uint32_t, std::map<std::string, float>> values;
   std::set<uint64_t> unknown;
-  bool pad_pressed = false;
-  double pad_press_at = 0;
+  bool pad_pressed[64] = {};
+  double pad_press_at[64] = {};
   std::set<uint32_t> logged_devices;
 
   void Log(const std::string &s) {
@@ -182,17 +182,18 @@ LighthouseInput::State LighthouseInput::GetState(uint32_t device) {
   s.a = v("/input/a/click") >= 0.5f;
   s.b = v("/input/b/click") >= 0.5f;
   s.stick_click = v("/input/thumbstick/click") >= 0.5f;
+  const int hi = device < 64 ? (int)device : 0;
   const float force = v("/input/trackpad/force");
   const double now = GetTickCount64() / 1000.0;
-  if (!impl_->pad_pressed) {
+  if (!impl_->pad_pressed[hi]) {
     if (force >= 0.65f) {
-      impl_->pad_pressed = true;
-      impl_->pad_press_at = now;
+      impl_->pad_pressed[hi] = true;
+      impl_->pad_press_at[hi] = now;
     }
-  } else if (force <= 0.25f && now - impl_->pad_press_at > 0.15) {
-    impl_->pad_pressed = false;
+  } else if (force <= 0.25f && now - impl_->pad_press_at[hi] > 0.15) {
+    impl_->pad_pressed[hi] = false;
   }
-  s.pad_click = impl_->pad_pressed || v("/input/trackpad/click") >= 0.5f;
+  s.pad_click = impl_->pad_pressed[hi] || v("/input/trackpad/click") >= 0.5f;
   s.pad_touch = v("/input/trackpad/touch") >= 0.5f;
   s.trigger_click = v("/input/trigger/click") >= 0.5f;
   s.trigger = v("/input/trigger/value");

@@ -1,5 +1,5 @@
 // The Frame-side half of the controller bridge: receives the PC's X samples on a Unix datagram
-// socket and publishes one virtual right-hand controller to the Frame's SteamVR.
+// socket and publishes one virtual controller per hand to the Frame's SteamVR.
 #pragma once
 
 #include <atomic>
@@ -12,14 +12,16 @@
 
 class FrameInput {
  public:
-  FrameInput() = default;
+  FrameInput();
   ~FrameInput();
 
-  bool Start();  // create the socket and add the virtual controller
+  bool Start();  // create the sockets and add the virtual controllers
   void Stop();
   void RunFrame();
 
  private:
+  static constexpr int kHands = 2;
+
   struct Sample {
     uint32_t seq = 0;
     uint32_t buttons = 0;
@@ -35,7 +37,7 @@ class FrameInput {
 
   class Device final : public vr::ITrackedDeviceServerDriver {
    public:
-    Device();
+    explicit Device(int hand);
     vr::EVRInitError Activate(uint32_t id) override;
     void Deactivate() override;
     void EnterStandby() override;
@@ -43,6 +45,10 @@ class FrameInput {
     void DebugRequest(const char *request, char *response, uint32_t size) override;
     vr::DriverPose_t GetPose() override { return last_pose_; }
     void Tick(const Sample &s, bool fresh, double now, uint32_t pulse_bits);
+    const char *Serial() const;
+    vr::ITrackedDeviceServerDriver *Driver() { return this; }
+    uint32_t Index() const { return index_; }
+    vr::VRInputComponentHandle_t HapticHandle() const { return haptic_; }
 
    private:
     struct Pulse {
@@ -62,6 +68,7 @@ class FrameInput {
       }
     };
 
+    int hand_;
     uint32_t index_ = vr::k_unTrackedDeviceIndexInvalid;
     vr::PropertyContainerHandle_t container_ = vr::k_ulInvalidPropertyContainer;
     vr::VRInputComponentHandle_t system_click_ = 0, system_touch_ = 0;
@@ -71,9 +78,11 @@ class FrameInput {
     vr::VRInputComponentHandle_t stick_x_ = 0, stick_y_ = 0, stick_click_ = 0, stick_touch_ = 0;
     vr::VRInputComponentHandle_t pad_x_ = 0, pad_y_ = 0, pad_touch_ = 0, pad_click_ = 0;
     vr::VRInputComponentHandle_t aim_pose_ = 0;
+    vr::VRInputComponentHandle_t haptic_ = 0;
     float last_battery_ = -1;
     bool last_charging_ = false;
     bool battery_seen_ = false;
+    bool claiming_ = false;
     vr::DriverPose_t last_pose_{};
     Pulse system_pulse_, a_pulse_, b_pulse_, stick_pulse_, pad_pulse_, trigger_pulse_;
     bool last_trigger_click_ = false;
@@ -83,24 +92,28 @@ class FrameInput {
     bool active_ = false;
     bool last_system_ = false;
 
-    void SetRole(bool active);
+    void SetRole(bool claim);
     void ReleaseInputs();
     void SetBool(vr::VRInputComponentHandle_t h, bool v);
     void SetScalar(vr::VRInputComponentHandle_t h, float v);
   };
 
   std::string path_;
+  std::string haptic_path_;
   int fd_ = -1;
+  int haptic_fd_ = -1;
   std::atomic<bool> run_{false};
   std::thread thread_;
   std::mutex m_;
-  std::atomic<uint32_t> pending_buttons_{0};
+  std::atomic<uint32_t> pending_buttons_[kHands];
   std::atomic<bool> link_up_{false};
-  Sample latest_;
-  bool have_sample_ = false;
-  Device device_;
+  Sample latest_[kHands];
+  bool have_sample_[kHands] = {false, false};
+  Device devices_[kHands];
 
   void Serve();
   void Parse(const char *line, size_t len);
+  void PollHaptics();
+  void SendHaptic(int hand, const vr::VREvent_HapticVibration_t &hv);
   static double Now();
 };

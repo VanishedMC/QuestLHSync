@@ -2,7 +2,9 @@
 // stream per session.
 //   discovery  UDP 47281: "QLHS?" (broadcast + configured hosts) -> "QLHS 1 <serial> <tcp port> <model>"
 //   stream     TCP 47280: "H ..." hello, "C <len> <name>" + the camera calibration, then lhsight's lines
-//              (F frames, T heartbeats, I/W/E messages); "P <seq> <pc_ns>" -> "Q <seq> <pc_ns> <mono_ns>" round trips
+//              (F frames, T heartbeats, I/W/E messages); "P <seq> <pc_ns>" -> "Q <seq> <pc_ns> <mono_ns>" round trips.
+//              Input: "X ..." lines PC->Frame and "D <hand>" when a controller disconnects. Haptics:
+//              "V <hand> <us> <hz> <amp>" Frame->PC.
 #pragma once
 #include <atomic>
 #include <deque>
@@ -22,11 +24,13 @@ class HeadsetLink {
                                                           // HeadsetId of its serial
   using LogFn = std::function<void(const std::string &)>;
   using RecFn = std::function<void(double, const std::string &)>;
+  using HapticFn = std::function<void(int, double, double, double)>;
 
   HeadsetLink(Sync *sync, LogFn log, RecFn rec) : sync_(sync), log_(std::move(log)), rec_(std::move(rec)) {}
   ~HeadsetLink() { Stop(); }
   void Start();
   void Stop();
+  void SetHapticHandler(HapticFn h) { haptic_ = std::move(h); }
   void SetWanted(bool w) { wanted_ = w; }             // an eligible HMD is in SteamVR
   void SetHosts(const std::vector<std::string> &h);   // manual addresses (settings): asked and tried over TCP too
   void SetPreferred(const std::string &serial);       // pick this headset when several answer
@@ -50,6 +54,7 @@ class HeadsetLink {
   Sync *sync_;
   LogFn log_;
   RecFn rec_;
+  HapticFn haptic_;
   std::thread th_;
   std::atomic<bool> run_{false}, wanted_{false};
   std::atomic<State> state_{kIdle};
