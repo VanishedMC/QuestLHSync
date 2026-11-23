@@ -488,10 +488,8 @@ bool HeadsetLink::Session(const Found &f) {
         case 'V': {
           int hand = 0;
           int us = 0;
-          double frequency = 0, amplitude = 0;
-          if (sscanf(line.c_str(), "V %d %d %lf %lf", &hand, &us, &frequency, &amplitude) == 4 &&
-              haptic_)
-            haptic_(hand, us / 1e6, frequency, amplitude);
+          if (sscanf(line.c_str(), "V %d %d", &hand, &us) == 2 && haptic_)
+            haptic_(hand, us / 1e6);
           break;
         }
         case 'Q': {

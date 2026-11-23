@@ -47,7 +47,6 @@ class FrameInput {
     void Tick(const Sample &s, bool fresh, double now, uint32_t pulse_bits);
     const char *Serial() const;
     vr::ITrackedDeviceServerDriver *Driver() { return this; }
-    uint32_t Index() const { return index_; }
     vr::VRInputComponentHandle_t HapticHandle() const { return haptic_; }
 
    private:

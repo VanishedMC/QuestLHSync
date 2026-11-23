@@ -68,14 +68,18 @@ struct client {
 static struct client cl[MAXC];
 static int ncl;
 
+#ifdef QLHS_FRAME
 static void input_status(int up);
+#endif
 
 static void cl_close(int i) {
   close(cl[i].fd);
   free(cl[i].out);
   cl[i] = cl[--ncl];
   memset(&cl[ncl], 0, sizeof cl[ncl]);
+#ifdef QLHS_FRAME
   input_status(ncl > 0);
+#endif
 }
 
 static int cl_queue(struct client *c, const char *d, size_t n) {
@@ -134,7 +138,13 @@ static void device_info(void) {
 
 static int send_hello(struct client *c) {
   char h[512];
-  int n = snprintf(h, sizeof h, "H QuestLHSync 1 serial=%s model=%s fw=%s module=%s cap=input1\n", serial, model, fw, MODULE_VERSION);
+  const char *cap =
+#ifdef QLHS_FRAME
+      " cap=input1";
+#else
+      "";
+#endif
+  int n = snprintf(h, sizeof h, "H QuestLHSync 1 serial=%s model=%s fw=%s module=%s%s\n", serial, model, fw, MODULE_VERSION, cap);
   if (cl_queue(c, h, n)) return -1;
   char *buf = NULL, name[256] = "";
   size_t got = 0;
@@ -235,6 +245,7 @@ static void pump(void) {
 // ---------------------------------------------------------------- controller input from the PC
 // The host sends "X ..." lines; hand them to the Frame SteamVR driver over a same-user datagram
 // socket. The driver creates the socket when SteamVR starts; sends before that simply fail.
+#ifdef QLHS_FRAME
 static int input_fd = -1;
 static struct sockaddr_un input_addr;
 
@@ -289,6 +300,7 @@ static void haptic_init(void) {
   chmod(path, 0600);
   fcntl(haptic_fd, F_SETFL, O_NONBLOCK);
 }
+#endif
 
 // ---------------------------------------------------------------- main
 static volatile sig_atomic_t quit;
@@ -323,8 +335,10 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_term);
   signal(SIGINT, on_term);
   device_info();
+#ifdef QLHS_FRAME
   input_init();
   haptic_init();
+#endif
   int ts = listen_tcp(), us = listen_udp();
   if (ts < 0 || us < 0) { logi("ports %d/%d busy: already running?", TCP_PORT, UDP_PORT); return 3; }
   hs_init(argc, argv);
@@ -372,7 +386,9 @@ int main(int argc, char **argv) {
           if (send_hello(c)) cl_close(ncl - 1);
           else {
             logi("client connected (%d)", ncl);
+#ifdef QLHS_FRAME
             input_status(1);
+#endif
             if (child > 0 && kill_at) logi("client back while lhsight stops: restarting it after");
             stop_at = 0;
             if (child <= 0) { failures = 0; restart_at = now; }
@@ -402,7 +418,9 @@ int main(int argc, char **argv) {
             char r[96];
             int k = snprintf(r, sizeof r, "Q %u %lld %lld\n", seq, pc, t);
             cl_queue(c, r, k);
-          } else if (c->in[s] == 'X' && c->in[s + 1] == ' ') {
+          }
+#ifdef QLHS_FRAME
+          else if (c->in[s] == 'X' && c->in[s + 1] == ' ') {
             input_forward(c->in + s, j - s);
             if (c->inputs++ == 0) logi("controller input: %.100s", c->in + s);
             if ((c->inputs % 25) == 0) {
@@ -411,6 +429,7 @@ int main(int argc, char **argv) {
               cl_queue(c, r, k);
             }
           }
+#endif
           s = j + 1;
         }
         memmove(c->in, c->in + s, c->ilen - s);
@@ -424,6 +443,7 @@ int main(int argc, char **argv) {
     reap();
     for (int i = 0; i < ncl; i++) cl_flush(i);
 
+#ifdef QLHS_FRAME
     if (haptic_fd >= 0) {
       char b[256];
       for (;;) {
@@ -438,6 +458,7 @@ int main(int argc, char **argv) {
       last_input_hb = now;
       input_forward(ncl > 0 ? "G 1\n" : "G 0\n", 4);
     }
+#endif
 
     // lhsight runs while someone listens
     if (ncl) {

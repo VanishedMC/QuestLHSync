@@ -130,7 +130,7 @@ struct StationPose {
 static StationPose g_dev[vr::k_unMaxTrackedDeviceCount];
 static std::atomic<long long> g_hooked{0}, g_moved{0};
 
-static void OnHaptic(int hand, double duration, double frequency, double amplitude) {
+static void OnHaptic(int hand, double duration) {
   if (!g_st) return;
   int device = -1;
   const int want = hand == 0 ? vr::TrackedControllerRole_LeftHand
@@ -142,10 +142,7 @@ static void OnHaptic(int hand, double duration, double frequency, double amplitu
     }
   }
   g_st->haptic_device = device;
-  g_st->haptic_hand = hand;
   g_st->haptic_us = (int)(duration * 1e6);
-  g_st->haptic_freq = (float)frequency;
-  g_st->haptic_amp = (float)amplitude;
   MemoryBarrier();
   InterlockedIncrement((volatile LONG *)&g_st->haptic_seq);
 }
@@ -329,6 +326,10 @@ static std::mutex g_stlog_m;
 static std::vector<std::string> g_pending_log;
 
 static void PushStatusLog(const std::string &s) {
+  // Keep the dashboard window quiet; detailed input traces stay in questlhsync.log.
+  if (s.rfind("input ", 0) == 0 || s.rfind("lighthouse input", 0) == 0 ||
+      s.rfind("haptic", 0) == 0)
+    return;
   std::lock_guard<std::mutex> g(g_stlog_m);
   time_t t = time(nullptr);
   struct tm tm;
@@ -392,9 +393,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     link_ = std::make_unique<HeadsetLink>(
         g_sync.get(), [](const std::string &s) { Log(s); },
         [](double t, const std::string &s) { if (g_sync) g_sync->Rec(t, "%s", s.c_str()); });
-    link_->SetHapticHandler([](int hand, double duration, double frequency, double amplitude) {
-      OnHaptic(hand, duration, frequency, amplitude);
-    });
+    link_->SetHapticHandler([](int hand, double duration) { OnHaptic(hand, duration); });
     link_->SetMemory(dir_ + "\\headset.txt");
     ReadSettings();
     if (MH_Initialize() != MH_OK) { Log("MH_Initialize failed"); return vr::VRInitError_None; }
@@ -793,7 +792,6 @@ class Provider : public vr::IServerTrackedDeviceProvider {
             snprintf(d, sizeof d, "D %d\n", hand);
             link_->SubmitInput(d);
             was_connected[hand] = false;
-            Log(Fmt("input release: hand %d disconnected", hand));
           }
           continue;
         }
@@ -830,8 +828,6 @@ class Provider : public vr::IServerTrackedDeviceProvider {
           last_tc[hand] = in.trigger_click;
           last_pad_touch[hand] = in.pad_touch;
           first[hand] = false;
-          Log(Fmt("input source: hand %d dev %u valid=%d role=%d", hand, id, in.valid ? 1 : 0,
-                  g_dev[id].role.load()));
         } else {
           if (in.system && !last_sys[hand]) buttons |= 1;
           if (in.a && !last_a[hand]) buttons |= 2;
@@ -844,18 +840,11 @@ class Provider : public vr::IServerTrackedDeviceProvider {
           last_sc[hand] = in.stick_click; last_pc[hand] = in.pad_click;
           last_tc[hand] = in.trigger_click;
         }
-        if (buttons) {
-          Log(Fmt("input send: hand %d buttons 0x%x trig %.2f grip %.2f", hand, buttons,
-                  in.trigger, in.grip));
-        }
+
         if ((buttons & 16) || (in.pad_touch && !last_pad_touch[hand]))
-          OnHaptic(hand, 0.0015, 0.0, 0.0);
+          OnHaptic(hand, 0.0015);
         last_pad_touch[hand] = in.pad_touch;
-        if ((in.trigger >= 0.5f) != last_trig[hand]) {
-          last_trig[hand] = in.trigger >= 0.5f;
-          Log(Fmt("input send: hand %d trigger %s (%.2f)", hand, last_trig[hand] ? "down" : "up",
-                  in.trigger));
-        }
+        last_trig[hand] = in.trigger >= 0.5f;
         char line[384];
         snprintf(line, sizeof line,
                  "X %d %u %lld %u %.3f %.3f %.3f %.3f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %d %.3f %d\n",

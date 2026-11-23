@@ -24,7 +24,7 @@ class HeadsetLink {
                                                           // HeadsetId of its serial
   using LogFn = std::function<void(const std::string &)>;
   using RecFn = std::function<void(double, const std::string &)>;
-  using HapticFn = std::function<void(int, double, double, double)>;
+  using HapticFn = std::function<void(int, double)>;
 
   HeadsetLink(Sync *sync, LogFn log, RecFn rec) : sync_(sync), log_(std::move(log)), rec_(std::move(rec)) {}
   ~HeadsetLink() { Stop(); }

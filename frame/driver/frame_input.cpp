@@ -245,7 +245,6 @@ void FrameInput::Parse(const char *line, size_t len) {
   s.q[0] = qw; s.q[1] = qx; s.q[2] = qy; s.q[3] = qz;
   s.p[0] = px; s.p[1] = py; s.p[2] = pz;
   s.rx = std::chrono::steady_clock::now();
-  if (s.buttons) Log("X buttons 0x%x hand=%d", s.buttons, hand);
   pending_buttons_[hand].fetch_or(s.buttons);
   {
     std::lock_guard<std::mutex> g(m_);
@@ -253,7 +252,6 @@ void FrameInput::Parse(const char *line, size_t len) {
     have_sample_[hand] = true;
   }
   (void)qpc;
-  if (seq % 120 == 0) Log("sample %u hand=%d", seq, hand);
 }
 
 void FrameInput::PollHaptics() {
@@ -277,7 +275,7 @@ void FrameInput::SendHaptic(int hand, const vr::VREvent_HapticVibration_t &hv) {
   char b[128];
   int us = (int)(hv.fDurationSeconds * 1e6);
   if (us <= 0) us = 1500;  // the dashboard emits zero-duration events; pulse briefly
-  const int n = snprintf(b, sizeof b, "V %d %d %.3f %.3f\n", hand, us, hv.fFrequency, hv.fAmplitude);
+  const int n = snprintf(b, sizeof b, "V %d %d\n", hand, us);
   if (n > 0) sendto(haptic_fd_, b, (size_t)n, MSG_DONTWAIT | MSG_NOSIGNAL, (sockaddr *)&a, sizeof a);
 }
 
@@ -403,7 +401,6 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
   if (active_frames_ < 2) {
     ++active_frames_;
   } else if (pending_buttons_) {
-    Log("pulse bits 0x%x hand=%d", pending_buttons_, hand_);
     if (pending_buttons_ & 1) system_pulse_.Fire(now);
     if (pending_buttons_ & 2) a_pulse_.Fire(now);
     if (pending_buttons_ & 4) b_pulse_.Fire(now);
@@ -413,7 +410,6 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
     pending_buttons_ = 0;
   }
   const bool sys_down = system_pulse_.Update(now);
-  if (sys_down && !last_system_) Log("system click down hand=%d", hand_);
   last_system_ = sys_down;
   SetBool(system_click_, sys_down);
   SetBool(system_touch_, sys_down);
@@ -422,8 +418,6 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
   SetBool(b_click_, b_pulse_.Update(now));
   SetBool(b_touch_, b_pulse_.Update(now));
   const bool trig_click = trigger_pulse_.Update(now);
-  if (trig_click && !last_trigger_click_) Log("trigger click down hand=%d", hand_);
-  else if (!trig_click && last_trigger_click_) Log("trigger click up hand=%d", hand_);
   last_trigger_click_ = trig_click;
   SetScalar(trigger_value_, s.trigger);
   SetBool(trigger_click_, trig_click);

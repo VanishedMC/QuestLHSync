@@ -44,7 +44,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     daemon = os.path.join(BUILD, "lhsyncd")
     driver = os.path.join(BUILD, "driver_questlhsync_frame.so")
-    subprocess.run([*cc, "-O2", "-Wall", f'-DMODULE_VERSION="{VERSION}"', f"-I{HEADSET}",
+    subprocess.run([*cc, "-O2", "-Wall", "-DQLHS_FRAME", f'-DMODULE_VERSION="{VERSION}"', f"-I{HEADSET}",
                     os.path.join(HEADSET, "lhsyncd.c"), os.path.join(HERE, "src", "frame.c"),
                     os.path.join(HERE, "src", "lhsight.c"), "-s", "-o", daemon], check=True)
     subprocess.run([*cxx, "-std=c++17", "-O2", "-Wall", "-fPIC", "-shared", "-fvisibility=hidden",
