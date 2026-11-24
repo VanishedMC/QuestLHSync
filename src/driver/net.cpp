@@ -479,12 +479,6 @@ bool HeadsetLink::Session(const Found &f) {
           }
           if (have_calib) sync_->OnLine(rx, line.c_str());
           break;
-        case 'K': {
-          unsigned acked = 0;
-          (void)acked;
-          sscanf(line.c_str(), "K %u", &acked);  // acknowledged; no log (it floods the dashboard)
-          break;
-        }
         case 'V': {
           int hand = 0;
           int us = 0;

@@ -83,6 +83,15 @@ Quat FromMatrix(const vr::HmdMatrix34_t &m) {
 
 bool Finite(double v) { return std::isfinite(v); }
 
+std::string RuntimeDir() {
+  char b[64];
+  std::snprintf(b, sizeof b, "/run/user/%u", (unsigned)getuid());
+  struct stat st;
+  if (stat(b, &st) == 0) return b;
+  const char *e = getenv("XDG_RUNTIME_DIR");
+  return e && *e ? e : "";
+}
+
 // The knuckle aim/tip pose, relative to the grip pose. The offset mirrors between hands,
 // matching the left/right Index render models.
 vr::HmdMatrix34_t AimOffsetMatrix(bool right) {
@@ -111,19 +120,22 @@ FrameInput::FrameInput() : devices_{Device(0), Device(1)} {}
 FrameInput::~FrameInput() { Stop(); }
 
 bool FrameInput::Start() {
-  const char *rt = getenv("XDG_RUNTIME_DIR");
-  if (!rt || !*rt) {
-    Log("no XDG_RUNTIME_DIR");
+  const std::string rt = RuntimeDir();
+  if (rt.empty()) {
+    Log("no runtime directory");
     return false;
   }
-  const std::string dir = std::string(rt) + "/questlhsync";
-  mkdir(dir.c_str(), 0700);
+  const std::string dir = rt + "/questlhsync";
+  if (mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) Log("mkdir %s: %s", dir.c_str(), strerror(errno));
   path_ = dir + "/input.sock";
   fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   haptic_path_ = dir + "/haptic.sock";
   haptic_fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd_ < 0 || haptic_fd_ < 0) {
     Log("socket: %s", strerror(errno));
+    if (fd_ >= 0) close(fd_);
+    if (haptic_fd_ >= 0) close(haptic_fd_);
+    fd_ = haptic_fd_ = -1;
     return false;
   }
   sockaddr_un a{};
@@ -144,17 +156,21 @@ bool FrameInput::Start() {
     fd_ = haptic_fd_ = -1;
     return false;
   }
-  chmod(path_.c_str(), 0600);
+  if (chmod(path_.c_str(), 0600) != 0) Log("chmod %s: %s", path_.c_str(), strerror(errno));
+  int added = 0;
   for (int h = 0; h < kHands; ++h) {
-    if (!vr::VRServerDriverHost()->TrackedDeviceAdded(
-            devices_[h].Serial(), vr::TrackedDeviceClass_Controller, devices_[h].Driver())) {
-      Log("TrackedDeviceAdded failed for hand %d", h);
-      close(fd_);
-      close(haptic_fd_);
-      fd_ = haptic_fd_ = -1;
-      unlink(path_.c_str());
-      return false;
-    }
+    if (vr::VRServerDriverHost()->TrackedDeviceAdded(
+            devices_[h].Serial(), vr::TrackedDeviceClass_Controller, devices_[h].Driver()))
+      ++added;
+    else
+      Log("TrackedDeviceAdded failed for hand %d; continuing with the other hand", h);
+  }
+  if (!added) {
+    close(fd_);
+    close(haptic_fd_);
+    fd_ = haptic_fd_ = -1;
+    unlink(path_.c_str());
+    return false;
   }
   run_ = true;
   thread_ = std::thread(&FrameInput::Serve, this);
@@ -189,7 +205,7 @@ void FrameInput::Serve() {
 }
 
 void FrameInput::Parse(const char *line, size_t len) {
-  (void)len;
+  if (len < 2) return;
   int link = 0;
   if (line[0] == 'G' && line[1] == ' ' && sscanf(line, "G %d", &link) == 1) {
     const bool up = link != 0;
@@ -335,7 +351,7 @@ void FrameInput::Device::ReleaseInputs() {
   SetScalar(stick_x_, 0); SetScalar(stick_y_, 0); SetBool(stick_click_, false); SetBool(stick_touch_, false);
   SetScalar(pad_x_, 0); SetScalar(pad_y_, 0); SetBool(pad_touch_, false); SetBool(pad_click_, false);
   system_pulse_.Reset(); a_pulse_.Reset(); b_pulse_.Reset(); stick_pulse_.Reset(); pad_pulse_.Reset();
-  trigger_pulse_.Reset(); last_trigger_click_ = false;
+  trigger_pulse_.Reset();
 }
 
 void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t pulse_bits) {
@@ -410,7 +426,6 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
     pending_buttons_ = 0;
   }
   const bool sys_down = system_pulse_.Update(now);
-  last_system_ = sys_down;
   SetBool(system_click_, sys_down);
   SetBool(system_touch_, sys_down);
   SetBool(a_click_, a_pulse_.Update(now));
@@ -418,7 +433,6 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
   SetBool(b_click_, b_pulse_.Update(now));
   SetBool(b_touch_, b_pulse_.Update(now));
   const bool trig_click = trigger_pulse_.Update(now);
-  last_trigger_click_ = trig_click;
   SetScalar(trigger_value_, s.trigger);
   SetBool(trigger_click_, trig_click);
   SetBool(trigger_touch_, s.trigger > 0.05f || trigger_pulse_.down);

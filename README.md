@@ -128,7 +128,8 @@ dashboard is closed.
   scroll. `A` switches the active laser hand. Both controllers can type on the
   Frame's virtual keyboard.
 - Dashboard haptic events are relayed back to the real controller. Trackpad
-  touch/right-click also produces a short pulse.
+  touch/right-click also produces a short pulse. Only the pulse duration is
+  applied; the event frequency and amplitude are not used.
 - Battery percentage and charging state are mirrored from the host controller.
 - The relay owns the hand while its input is live. When the knuckle is switched
   off or the link drops, the hand is released immediately and the Frame's own

@@ -39,6 +39,7 @@ static const char *kSection = "driver_questlhsync";
 
 // ---------------------------------------------------------------- logging
 static std::mutex g_log_m;
+static std::mutex g_st_m;
 static FILE *g_logf;
 static QlhsStatus *g_st;
 static std::unique_ptr<Sync> g_sync;
@@ -128,6 +129,9 @@ struct StationPose {
   double q[4];
 };
 static StationPose g_dev[vr::k_unMaxTrackedDeviceCount];
+static std::atomic<bool> g_connected[vr::k_unMaxTrackedDeviceCount];
+static std::atomic<float> g_battery[vr::k_unMaxTrackedDeviceCount];
+static std::atomic<bool> g_charging[vr::k_unMaxTrackedDeviceCount];
 static std::atomic<long long> g_hooked{0}, g_moved{0};
 
 static void OnHaptic(int hand, double duration) {
@@ -141,10 +145,15 @@ static void OnHaptic(int hand, double duration) {
       break;
     }
   }
+  std::lock_guard<std::mutex> g(g_st_m);
+  InterlockedIncrement((volatile LONG *)&g_st->seq);
+  MemoryBarrier();
   g_st->haptic_device = device;
+  g_st->haptic_hand = hand;
   g_st->haptic_us = (int)(duration * 1e6);
   MemoryBarrier();
   InterlockedIncrement((volatile LONG *)&g_st->haptic_seq);
+  InterlockedIncrement((volatile LONG *)&g_st->seq);
 }
 
 // last corrected lighthouse pose and last HMD pose, for the input sender
@@ -382,6 +391,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
       g_st->version = QLHS_VERSION;
       g_st->magic = QLHS_MAGIC;
     }
+    for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) g_battery[i].store(-1.f);
     Log("QuestLHSync " QLHS_RELEASE " driver starting, data in %LOCALAPPDATA%\\QuestLHSync");
     SyncConfig cfg;
     cfg.dir = dir_;
@@ -427,7 +437,12 @@ class Provider : public vr::IServerTrackedDeviceProvider {
   const char *const *GetInterfaceVersions() override { return vr::k_InterfaceVersions; }
 
   void RunFrame() override {
-    if (wired_ || ++tick_ % 45) return;  // classify devices about twice a second
+    if (wired_) return;
+    vr::TrackedDevicePose_t raw[vr::k_unMaxTrackedDeviceCount]{};
+    vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, raw, vr::k_unMaxTrackedDeviceCount);
+    for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+      g_connected[i].store(raw[i].bDeviceIsConnected);
+    if (++tick_ % 45) return;  // classify devices about twice a second
     auto *props = vr::VRProperties();
     for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; i++) {
       int kind = g_kind[i].load();
@@ -526,12 +541,14 @@ class Provider : public vr::IServerTrackedDeviceProvider {
   void ReadReceiver(uint32_t i) {
     auto c = vr::VRProperties()->TrackedDeviceToPropertyContainer(i);
     if (c == vr::k_ulInvalidPropertyContainer) return;
-    std::string r = GetStr(c, vr::Prop_ConnectedWirelessDongle_String);
-    if (r == receiver_[i]) return;
-    receiver_[i] = r;
+    // The role hint can arrive after the dongle string (and wired controllers have no dongle
+    // string at all), so read it before the receiver early-out.
     vr::ETrackedPropertyError re = vr::TrackedProp_Success;
     const int32_t role = vr::VRProperties()->GetInt32Property(c, vr::Prop_ControllerRoleHint_Int32, &re);
     if (re == vr::TrackedProp_Success) g_dev[i].role.store(role);
+    std::string r = GetStr(c, vr::Prop_ConnectedWirelessDongle_String);
+    if (r == receiver_[i]) return;
+    receiver_[i] = r;
     g_gravity->SetDevice((int)i, g_dev[i].serial, r);
   }
 
@@ -681,6 +698,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
 
   void Publish(double now) {
     if (!g_st) return;
+    std::lock_guard<std::mutex> g(g_st_m);
     Sync::Status s = g_sync->GetStatus(now);
     int hmd = g_hmd.load();
     std::string model, system;
@@ -763,11 +781,11 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     bool last_sys[2] = {}, last_a[2] = {}, last_b[2] = {}, last_sc[2] = {}, last_pc[2] = {};
     bool last_tc[2] = {};
     bool last_pad_touch[2] = {};
-    bool first[2] = {true, true}, last_trig[2] = {false, false};
-    float battery[2] = {-1.f, -1.f};
-    int charging[2] = {0, 0};
-    double last_batt[2] = {0, 0};
+    bool first[2] = {true, true};
     bool was_connected[2] = {false, false};
+    double release_until[2] = {0, 0};
+    double release_last[2] = {0, 0};
+    std::set<uint32_t> logged_bad_role;
     while (run_) {
       if (!link_ || !link_->CapInput() || !g_gravity) {
         Sleep(20);
@@ -777,40 +795,39 @@ class Provider : public vr::IServerTrackedDeviceProvider {
       const bool have_hmd = LoadPose(g_hmd_pose, hp, hq, ht);
       const vr::HmdQuaternion_t inv{hq[0], -hq[1], -hq[2], -hq[3]};
       const double hpos[3] = {hp[0], hp[1], hp[2]};
-      vr::TrackedDevicePose_t raw[vr::k_unMaxTrackedDeviceCount]{};
-      vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, raw, vr::k_unMaxTrackedDeviceCount);
+      uint32_t hand_dev[2] = {vr::k_unTrackedDeviceIndexInvalid, vr::k_unTrackedDeviceIndexInvalid};
       for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; id++) {
         if (g_kind[id].load() != kLighthouse || g_dev[id].cls != vr::TrackedDeviceClass_Controller)
           continue;
         const int role = g_dev[id].role.load();
-        if (role != vr::TrackedControllerRole_LeftHand && role != vr::TrackedControllerRole_RightHand)
+        if (role != vr::TrackedControllerRole_LeftHand && role != vr::TrackedControllerRole_RightHand) {
+          if (logged_bad_role.insert(id).second)
+            Log(Fmt("input skip: device %u has no hand role (hint %d)", id, role));
           continue;
+        }
         const int hand = role == vr::TrackedControllerRole_RightHand ? 1 : 0;
-        if (!raw[id].bDeviceIsConnected) {
+        if (hand_dev[hand] != vr::k_unTrackedDeviceIndexInvalid && hand_dev[hand] != id)
+          continue;  // two devices claim the same hand; first wins this frame
+        hand_dev[hand] = id;
+        const double now = QpcNow();
+        if (!g_connected[id].load()) {
           if (was_connected[hand]) {
+            was_connected[hand] = false;
+            release_until[hand] = now + 1.0;
+            release_last[hand] = 0;
+          }
+          if (now < release_until[hand] && now - release_last[hand] >= 0.1) {
             char d[24];
             snprintf(d, sizeof d, "D %d\n", hand);
             link_->SubmitInput(d);
-            was_connected[hand] = false;
+            release_last[hand] = now;
           }
           continue;
         }
         was_connected[hand] = true;
+        release_until[hand] = 0;
         double p[3], q[4], t;
         if (!LoadPose(g_pose[id], p, q, t)) continue;
-        const double now = QpcNow();
-        if (now - last_batt[hand] >= 1.0) {
-          last_batt[hand] = now;
-          auto *props = vr::VRProperties();
-          const auto c = props->TrackedDeviceToPropertyContainer(id);
-          if (c != vr::k_ulInvalidPropertyContainer) {
-            vr::ETrackedPropertyError e = vr::TrackedProp_Success;
-            battery[hand] = props->GetFloatProperty(c, vr::Prop_DeviceBatteryPercentage_Float, &e);
-            if (e != vr::TrackedProp_Success) battery[hand] = -1.f;
-            e = vr::TrackedProp_Success;
-            charging[hand] = props->GetBoolProperty(c, vr::Prop_DeviceIsCharging_Bool, &e) ? 1 : 0;
-          }
-        }
         double rel[3] = {0, 0, -0.45};
         vr::HmdQuaternion_t rq{1, 0, 0, 0};
         if (have_hmd) {
@@ -844,13 +861,13 @@ class Provider : public vr::IServerTrackedDeviceProvider {
         if ((buttons & 16) || (in.pad_touch && !last_pad_touch[hand]))
           OnHaptic(hand, 0.0015);
         last_pad_touch[hand] = in.pad_touch;
-        last_trig[hand] = in.trigger >= 0.5f;
         char line[384];
         snprintf(line, sizeof line,
                  "X %d %u %lld %u %.3f %.3f %.3f %.3f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %d %.3f %d\n",
                  hand, seq++, (long long)(QpcNow() * 1e9), buttons, in.trigger, in.grip, in.stick_x,
                  in.stick_y, rq.w, rq.x, rq.y, rq.z, rel[0], rel[1], rel[2], in.pad_x, in.pad_y,
-                 in.pad_touch ? 1 : 0, battery[hand], charging[hand]);
+                 in.pad_touch ? 1 : 0, g_battery[id].load(),
+                 g_charging[id].load() ? 1 : 0);
         link_->SubmitInput(line);
       }
       Sleep(8);

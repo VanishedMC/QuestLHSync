@@ -4,7 +4,7 @@
 //   stream     TCP 47280: "H ..." hello, "C <len> <name>" + the camera calibration, then lhsight's lines
 //              (F frames, T heartbeats, I/W/E messages); "P <seq> <pc_ns>" -> "Q <seq> <pc_ns> <mono_ns>" round trips.
 //              Input: "X ..." lines PC->Frame and "D <hand>" when a controller disconnects. Haptics:
-//              "V <hand> <us> <hz> <amp>" Frame->PC.
+//              "V <hand> <us>" Frame->PC.
 #pragma once
 #include <atomic>
 #include <deque>

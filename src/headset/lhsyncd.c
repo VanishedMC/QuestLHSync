@@ -67,12 +67,21 @@ struct client {
 };
 static struct client cl[MAXC];
 static int ncl;
+#ifdef QLHS_FRAME
+static int input_owner_fd = -1;
+#endif
 
 #ifdef QLHS_FRAME
 static void input_status(int up);
 #endif
 
 static void cl_close(int i) {
+#ifdef QLHS_FRAME
+  if (cl[i].fd == input_owner_fd) {
+    input_owner_fd = -1;
+    logi("input owner disconnected");
+  }
+#endif
   close(cl[i].fd);
   free(cl[i].out);
   cl[i] = cl[--ncl];
@@ -246,14 +255,27 @@ static void pump(void) {
 // The host sends "X ..." lines; hand them to the Frame SteamVR driver over a same-user datagram
 // socket. The driver creates the socket when SteamVR starts; sends before that simply fail.
 #ifdef QLHS_FRAME
+// SteamVR and the systemd user unit can disagree about XDG_RUNTIME_DIR (nested Plasma vs
+// /run/user/<uid>). Use the stable per-user runtime dir when it exists so both ends meet.
+static const char *runtime_dir(void) {
+  static char dir[64];
+  snprintf(dir, sizeof dir, "/run/user/%u", (unsigned)getuid());
+  struct stat st;
+  if (stat(dir, &st) == 0) return dir;
+  const char *e = getenv("XDG_RUNTIME_DIR");
+  return e && *e ? e : "";
+}
+
 static int input_fd = -1;
 static struct sockaddr_un input_addr;
 
 static void input_init(void) {
-  const char *rt = getenv("XDG_RUNTIME_DIR");
+  const char *rt = runtime_dir();
   if (!rt || !*rt) return;
-  char path[256];
-  int n = snprintf(path, sizeof path, "%s/questlhsync/input.sock", rt);
+  char dir[256], path[256];
+  snprintf(dir, sizeof dir, "%s/questlhsync", rt);
+  if (mkdir(dir, 0700) != 0 && errno != EEXIST) logi("input dir %s: %s", dir, strerror(errno));
+  int n = snprintf(path, sizeof path, "%s/input.sock", dir);
   if (n <= 0 || (size_t)n >= sizeof input_addr.sun_path) return;
   input_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (input_fd < 0) return;
@@ -281,10 +303,16 @@ static void input_status(int up) {
 static int haptic_fd = -1;
 
 static void haptic_init(void) {
-  const char *rt = getenv("XDG_RUNTIME_DIR");
-  if (!rt || !*rt) return;
-  char path[256];
-  int n = snprintf(path, sizeof path, "%s/questlhsync/haptic.sock", rt);
+  if (haptic_fd >= 0) return;
+  const char *rt = runtime_dir();
+  if (!rt || !*rt) {
+    logi("haptic relay: no runtime directory, retrying");
+    return;
+  }
+  char dir[256], path[256];
+  snprintf(dir, sizeof dir, "%s/questlhsync", rt);
+  if (mkdir(dir, 0700) != 0 && errno != EEXIST) logi("haptic dir %s: %s", dir, strerror(errno));
+  int n = snprintf(path, sizeof path, "%s/haptic.sock", dir);
   struct sockaddr_un a = {0};
   a.sun_family = AF_UNIX;
   if (n <= 0 || (size_t)n >= sizeof a.sun_path) return;
@@ -293,12 +321,14 @@ static void haptic_init(void) {
   if (haptic_fd < 0) return;
   unlink(path);
   if (bind(haptic_fd, (struct sockaddr *)&a, sizeof a) != 0) {
+    logi("haptic relay bind %s: %s (retrying)", path, strerror(errno));
     close(haptic_fd);
     haptic_fd = -1;
     return;
   }
-  chmod(path, 0600);
+  if (chmod(path, 0600) != 0) logi("haptic chmod %s: %s", path, strerror(errno));
   fcntl(haptic_fd, F_SETFL, O_NONBLOCK);
+  logi("haptic relay up on %s", path);
 }
 #endif
 
@@ -387,6 +417,10 @@ int main(int argc, char **argv) {
           else {
             logi("client connected (%d)", ncl);
 #ifdef QLHS_FRAME
+            if (input_owner_fd < 0) {
+              input_owner_fd = c->fd;
+              logi("input owner client %d", c->fd);
+            }
             input_status(1);
 #endif
             if (child > 0 && kill_at) logi("client back while lhsight stops: restarting it after");
@@ -420,13 +454,12 @@ int main(int argc, char **argv) {
             cl_queue(c, r, k);
           }
 #ifdef QLHS_FRAME
-          else if (c->in[s] == 'X' && c->in[s + 1] == ' ') {
-            input_forward(c->in + s, j - s);
-            if (c->inputs++ == 0) logi("controller input: %.100s", c->in + s);
-            if ((c->inputs % 25) == 0) {
-              char r[32];
-              int k = snprintf(r, sizeof r, "K %u\n", c->inputs);
-              cl_queue(c, r, k);
+          else if ((c->in[s] == 'X' || c->in[s] == 'D') && c->in[s + 1] == ' ') {
+            if (c->fd != input_owner_fd) {
+              if (c->inputs++ == 0) logi("controller input ignored from non-owner");
+            } else {
+              input_forward(c->in + s, j - s);
+              if (c->inputs++ == 0) logi("controller input: %.100s", c->in + s);
             }
           }
 #endif
@@ -444,6 +477,11 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ncl; i++) cl_flush(i);
 
 #ifdef QLHS_FRAME
+    static double next_haptic_try;
+    if (haptic_fd < 0 && now >= next_haptic_try) {
+      next_haptic_try = now + 2.0;
+      haptic_init();
+    }
     if (haptic_fd >= 0) {
       char b[256];
       for (;;) {

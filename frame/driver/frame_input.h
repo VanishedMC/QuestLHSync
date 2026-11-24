@@ -84,12 +84,10 @@ class FrameInput {
     bool claiming_ = false;
     vr::DriverPose_t last_pose_{};
     Pulse system_pulse_, a_pulse_, b_pulse_, stick_pulse_, pad_pulse_, trigger_pulse_;
-    bool last_trigger_click_ = false;
     uint32_t last_seq_ = 0;
     uint32_t pending_buttons_ = 0;
     int active_frames_ = 0;
     bool active_ = false;
-    bool last_system_ = false;
 
     void SetRole(bool claim);
     void ReleaseInputs();

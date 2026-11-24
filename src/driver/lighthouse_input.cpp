@@ -38,6 +38,8 @@ struct LighthouseInput::Impl {
   void *input = nullptr;
   bool ctx_hooked = false;
   bool input_hooked = false;
+  double ctx_hooked_at = 0;
+  bool input_wait_logged = false;
   GetGenericInterfaceFn orig_get_generic = nullptr;
   CreateBoolFn orig_create_bool = nullptr;
   UpdateBoolFn orig_update_bool = nullptr;
@@ -66,13 +68,15 @@ struct LighthouseInput::Impl {
   void Remember(vr::PropertyContainerHandle_t container, const char *path,
                 vr::VRInputComponentHandle_t handle) {
     const uint32_t device = DeviceForContainer(container);
+    bool log_device = false;
     {
       std::lock_guard<std::mutex> g(m);
       comps[handle] = {device, path ? path : ""};
+      log_device = logged_devices.insert(device).second;
     }
     Log("create handle=" + std::to_string((unsigned long long)handle) + " dev=" +
         std::to_string(device) + " " + (path ? path : ""));
-    if (logged_devices.insert(device).second) {
+    if (log_device) {
       auto *props = vr::VRProperties();
       const std::string serial = props->GetStringProperty(container, vr::Prop_SerialNumber_String, nullptr);
       const int32_t role = props->GetInt32Property(container, vr::Prop_ControllerRoleHint_Int32, nullptr);
@@ -120,6 +124,7 @@ struct LighthouseInput::Impl {
       return;
     }
     ctx_hooked = true;
+    ctx_hooked_at = GetTickCount64() / 1000.0;
     Log("hooked driver context GetGenericInterface");
   }
 
@@ -207,7 +212,17 @@ LighthouseInput::State LighthouseInput::GetState(uint32_t device) {
 
 void LighthouseInput::Poll() {
   if (!impl_) return;
-  if (!impl_->ctx_hooked) impl_->HookContext();
+  if (!impl_->ctx_hooked) {
+    impl_->HookContext();
+    return;
+  }
+  if (!impl_->input_hooked && !impl_->input_wait_logged) {
+    const double now = GetTickCount64() / 1000.0;
+    if (now - impl_->ctx_hooked_at > 5.0) {
+      impl_->input_wait_logged = true;
+      impl_->Log("waiting for lighthouse IVRDriverInput; controllers may already be active");
+    }
+  }
 }
 
 void LighthouseInput::Stop() {
@@ -240,7 +255,14 @@ void *GetGenericInterfaceDetour(vr::IVRDriverContext *self, const char *version,
     impl->Log("GetGenericInterface " + std::string(version) + " ctx=" +
               std::to_string((unsigned long long)self) + " iface=" +
               std::to_string((unsigned long long)result));
-    if (self != impl->ctx) impl->HookInput(result);
+    if (std::strcmp(version, "IVRDriverInput_004") != 0 &&
+        std::strcmp(version, "IVRDriverInput_005") != 0) {
+      impl->Log("unsupported IVRDriverInput version; not hooking");
+    } else if (self == impl->ctx) {
+      impl->Log("IVRDriverInput requested through our own context; not hooking");
+    } else {
+      impl->HookInput(result);
+    }
   }
   return result;
 }

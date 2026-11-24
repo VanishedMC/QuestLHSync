@@ -78,5 +78,6 @@ struct QlhsStatus {
   volatile int32_t haptic_seq;  // driver -> overlay: pulse the real controller
   int32_t haptic_us;
   int32_t haptic_device;
+  int32_t haptic_hand;
 };
 #pragma pack(pop)
