@@ -554,6 +554,13 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     vr::ETrackedPropertyError re = vr::TrackedProp_Success;
     const int32_t role = vr::VRProperties()->GetInt32Property(c, vr::Prop_ControllerRoleHint_Int32, &re);
     if (re == vr::TrackedProp_Success) g_dev[i].role.store(role);
+    auto *props = vr::VRProperties();
+    vr::ETrackedPropertyError be = vr::TrackedProp_Success;
+    g_battery[i].store(props->GetFloatProperty(c, vr::Prop_DeviceBatteryPercentage_Float, &be));
+    if (be != vr::TrackedProp_Success) g_battery[i].store(-1.f);
+    be = vr::TrackedProp_Success;
+    const bool charging = props->GetBoolProperty(c, vr::Prop_DeviceIsCharging_Bool, &be);
+    g_charging[i].store(be == vr::TrackedProp_Success && charging);
     std::string r = GetStr(c, vr::Prop_ConnectedWirelessDongle_String);
     if (r == receiver_[i]) return;
     receiver_[i] = r;
