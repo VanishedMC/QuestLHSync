@@ -10,6 +10,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <shlobj.h>
+#include <timeapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -377,6 +378,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
  public:
   vr::EVRInitError Init(vr::IVRDriverContext *ctx) override {
     VR_INIT_SERVER_DRIVER_CONTEXT(ctx);
+    timeBeginPeriod(1);  // the input sender sleeps 8 ms; the default timer rounds that to 15.6 ms
     dir_ = DataDir();
     {
       std::lock_guard<std::mutex> g(g_log_m);
@@ -432,6 +434,7 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     MH_Uninitialize();
     if (g_sync) g_sync->SetRecord(nullptr);
     Log("QuestLHSync driver stopped");
+    timeEndPeriod(1);
     // g_sync and the mappings stay: a late pose update on another thread may still touch them while vrserver exits
     VR_CLEANUP_SERVER_DRIVER_CONTEXT();
   }
@@ -868,13 +871,16 @@ class Provider : public vr::IServerTrackedDeviceProvider {
         if ((buttons & 16) || (in.pad_touch && !last_pad_touch[hand]))
           OnHaptic(hand, 0.0015);
         last_pad_touch[hand] = in.pad_touch;
-        char line[384];
+        char line[512];
         snprintf(line, sizeof line,
-                 "X %d %u %lld %u %.3f %.3f %.3f %.3f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %d %.3f %d\n",
+                 "X %d %u %lld %u %.3f %.3f %.3f %.3f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %d %.3f %d"
+                 " %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
                  hand, seq++, (long long)(QpcNow() * 1e9), buttons, in.trigger, in.grip, in.stick_x,
                  in.stick_y, rq.w, rq.x, rq.y, rq.z, rel[0], rel[1], rel[2], in.pad_x, in.pad_y,
                  in.pad_touch ? 1 : 0, g_battery[id].load(),
-                 g_charging[id].load() ? 1 : 0);
+                 g_charging[id].load() ? 1 : 0,
+                 p[0], p[1], p[2], q[0], q[1], q[2], q[3],
+                 hpos[0], hpos[1], hpos[2], hq[0], hq[1], hq[2], hq[3]);
         link_->SubmitInput(line);
       }
       Sleep(8);

@@ -37,6 +37,8 @@ Quat Mul(const Quat &a, const Quat &b) {
           a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
 }
 
+Quat Conj(const Quat &q) { return {q.w, -q.x, -q.y, -q.z}; }
+
 void Rotate(const Quat &q, const double v[3], double out[3]) {
   const double ux = q.x, uy = q.y, uz = q.z;
   const double cx = uy * v[2] - uz * v[1];
@@ -234,16 +236,28 @@ void FrameInput::Parse(const char *line, size_t len) {
   float battery = -1;
   int charging = 0;
   double qw = 1, qx = 0, qy = 0, qz = 0, px = 0, py = 0, pz = 0;
+  double apx = 0, apy = 0, apz = 0, aqw = 1, aqx = 0, aqy = 0, aqz = 0;
+  double hpx = 0, hpy = 0, hpz = 0, hqw = 1, hqx = 0, hqy = 0, hqz = 0;
   const int n = sscanf(line,
-                       "X %d %u %lld %u %f %f %f %f %lf %lf %lf %lf %lf %lf %lf %f %f %d %f %d",
+                       "X %d %u %lld %u %f %f %f %f %lf %lf %lf %lf %lf %lf %lf %f %f %d %f %d"
+                       " %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf",
                        &hand, &seq, &qpc, &buttons, &trigger, &grip, &sx, &sy, &qw, &qx, &qy,
-                       &qz, &px, &py, &pz, &pad_x, &pad_y, &pad_touch, &battery, &charging);
+                       &qz, &px, &py, &pz, &pad_x, &pad_y, &pad_touch, &battery, &charging,
+                       &apx, &apy, &apz, &aqw, &aqx, &aqy, &aqz,
+                       &hpx, &hpy, &hpz, &hqw, &hqx, &hqy, &hqz);
   if (n < 15 || hand < 0 || hand >= kHands) return;
   const double norm = qw * qw + qx * qx + qy * qy + qz * qz;
   if (!Finite(trigger) || !Finite(grip) || !Finite(sx) || !Finite(sy) || !Finite(norm) ||
       std::abs(norm - 1) > 0.1 || !Finite(px) || !Finite(py) || !Finite(pz) || !Finite(pad_x) ||
       !Finite(pad_y))
     return;
+  const double anorm = aqw * aqw + aqx * aqx + aqy * aqy + aqz * aqz;
+  const double hnorm = hqw * hqw + hqx * hqx + hqy * hqy + hqz * hqz;
+  const bool absolute = n >= 34 && Finite(apx) && Finite(apy) && Finite(apz) &&
+                        Finite(aqw) && Finite(aqx) && Finite(aqy) && Finite(aqz) &&
+                        Finite(hpx) && Finite(hpy) && Finite(hpz) && Finite(hqw) && Finite(hqx) &&
+                        Finite(hqy) && Finite(hqz) && std::abs(anorm - 1) < 0.1 &&
+                        std::abs(hnorm - 1) < 0.1;
   Sample s;
   s.seq = seq;
   s.buttons = buttons;
@@ -260,6 +274,13 @@ void FrameInput::Parse(const char *line, size_t len) {
   s.charging = charging != 0;
   s.q[0] = qw; s.q[1] = qx; s.q[2] = qy; s.q[3] = qz;
   s.p[0] = px; s.p[1] = py; s.p[2] = pz;
+  s.absolute = absolute;
+  if (absolute) {
+    s.ap[0] = apx; s.ap[1] = apy; s.ap[2] = apz;
+    s.aq[0] = aqw; s.aq[1] = aqx; s.aq[2] = aqy; s.aq[3] = aqz;
+    s.hp[0] = hpx; s.hp[1] = hpy; s.hp[2] = hpz;
+    s.hq[0] = hqw; s.hq[1] = hqx; s.hq[2] = hqy; s.hq[3] = hqz;
+  }
   s.rx = std::chrono::steady_clock::now();
   pending_buttons_[hand].fetch_or(s.buttons);
   {
@@ -297,7 +318,7 @@ void FrameInput::SendHaptic(int hand, const vr::VREvent_HapticVibration_t &hv) {
 
 void FrameInput::RunFrame() {
   PollHaptics();
-  bool have[kHands] = {false, false};
+  bool have[kHands] = {false, false}, fresh[kHands] = {false, false};
   Sample samples[kHands];
   {
     std::lock_guard<std::mutex> g(m_);
@@ -308,14 +329,61 @@ void FrameInput::RunFrame() {
   }
   const double now = Now();
   const bool link = link_up_.load();
+  if (!link) xf_valid_ = false;
+  vr::TrackedDevicePose_t hmd{};
+  vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, &hmd, 1);
+  Quat fq;
+  double fp[3] = {0, 0, 0};
+  if (hmd.bPoseIsValid) {
+    fq = FromMatrix(hmd.mDeviceToAbsoluteTracking);
+    fp[0] = hmd.mDeviceToAbsoluteTracking.m[0][3];
+    fp[1] = hmd.mDeviceToAbsoluteTracking.m[1][3];
+    fp[2] = hmd.mDeviceToAbsoluteTracking.m[2][3];
+  }
   for (int h = 0; h < kHands; ++h) {
-    bool fresh = false;
-    if (link && have[h]) {
-      const auto age =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - samples[h].rx).count();
-      fresh = age >= 0 && age < 0.5;
+    if (!link || !have[h]) continue;
+    const auto age =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - samples[h].rx).count();
+    fresh[h] = age >= 0 && age < 0.5;
+  }
+  // Align the PC's tracking universe to the Frame's once, while both report the same physical head.
+  // After that the controllers are placed from the PC's absolute poses, so head motion no longer drags
+  // a stale relative pose around.
+  if (!xf_valid_ && hmd.bPoseIsValid) {
+    for (int h = 0; h < kHands; ++h) {
+      if (!fresh[h] || !samples[h].absolute) continue;
+      const Quat hq{samples[h].hq[0], samples[h].hq[1], samples[h].hq[2], samples[h].hq[3]};
+      const Quat tq = Mul(fq, Conj(hq));
+      double tp[3];
+      Rotate(tq, samples[h].hp, tp);
+      for (int i = 0; i < 3; ++i) xf_p_[i] = fp[i] - tp[i];
+      xf_q_[0] = tq.w; xf_q_[1] = tq.x; xf_q_[2] = tq.y; xf_q_[3] = tq.z;
+      xf_valid_ = true;
+      Log("host tracking aligned to the Frame");
+      break;
     }
-    devices_[h].Tick(samples[h], fresh, now, pending_buttons_[h].exchange(0));
+  }
+  for (int h = 0; h < kHands; ++h) {
+    if (fresh[h]) {
+      if (xf_valid_ && samples[h].absolute) {
+        const Quat tq{xf_q_[0], xf_q_[1], xf_q_[2], xf_q_[3]};
+        Rotate(tq, samples[h].ap, samples[h].wp);
+        for (int i = 0; i < 3; ++i) samples[h].wp[i] += xf_p_[i];
+        const Quat wq = Mul(tq, Quat{samples[h].aq[0], samples[h].aq[1],
+                                     samples[h].aq[2], samples[h].aq[3]});
+        samples[h].wq[0] = wq.w; samples[h].wq[1] = wq.x;
+        samples[h].wq[2] = wq.y; samples[h].wq[3] = wq.z;
+      } else {
+        Rotate(fq, samples[h].p, samples[h].wp);
+        for (int i = 0; i < 3; ++i) samples[h].wp[i] += fp[i];
+        const Quat wq = Mul(fq, Quat{samples[h].q[0], samples[h].q[1],
+                                     samples[h].q[2], samples[h].q[3]});
+        samples[h].wq[0] = wq.w; samples[h].wq[1] = wq.x;
+        samples[h].wq[2] = wq.y; samples[h].wq[3] = wq.z;
+      }
+      samples[h].world = true;
+    }
+    devices_[h].Tick(samples[h], fresh[h], now, pending_buttons_[h].exchange(0));
   }
 }
 
@@ -383,25 +451,12 @@ void FrameInput::Device::Tick(const Sample &s, bool fresh, double now, uint32_t 
   }
   SetRole(true);
 
-  vr::TrackedDevicePose_t hmd{};
-  vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, &hmd, 1);
-  Quat hq;
-  double hp[3] = {0, 0, 0};
-  if (hmd.bPoseIsValid) {
-    hq = FromMatrix(hmd.mDeviceToAbsoluteTracking);
-    hp[0] = hmd.mDeviceToAbsoluteTracking.m[0][3];
-    hp[1] = hmd.mDeviceToAbsoluteTracking.m[1][3];
-    hp[2] = hmd.mDeviceToAbsoluteTracking.m[2][3];
-  }
-  double wp[3], rel[3] = {s.p[0], s.p[1], s.p[2]};
-  Rotate(hq, rel, wp);
-  for (int i = 0; i < 3; i++) wp[i] += hp[i];
-  const Quat wq = Mul(hq, Quat{s.q[0], s.q[1], s.q[2], s.q[3]});
+  if (!s.world) return;
   vr::DriverPose_t p{};
   p.qWorldFromDriverRotation.w = 1;
   p.qDriverFromHeadRotation.w = 1;
-  p.vecPosition[0] = wp[0]; p.vecPosition[1] = wp[1]; p.vecPosition[2] = wp[2];
-  p.qRotation = {wq.w, wq.x, wq.y, wq.z};
+  p.vecPosition[0] = s.wp[0]; p.vecPosition[1] = s.wp[1]; p.vecPosition[2] = s.wp[2];
+  p.qRotation = {s.wq[0], s.wq[1], s.wq[2], s.wq[3]};
   p.deviceIsConnected = true;
   p.poseIsValid = true;
   p.result = vr::TrackingResult_Running_OK;

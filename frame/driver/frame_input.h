@@ -32,6 +32,11 @@ class FrameInput {
     bool charging = false;
     double q[4] = {1, 0, 0, 0};
     double p[3] = {0, 0, 0};
+    double ap[3] = {0, 0, 0}, aq[4] = {1, 0, 0, 0};
+    double hp[3] = {0, 0, 0}, hq[4] = {1, 0, 0, 0};
+    bool absolute = false;
+    double wp[3] = {0, 0, 0}, wq[4] = {1, 0, 0, 0};
+    bool world = false;
     std::chrono::steady_clock::time_point rx;
   };
 
@@ -106,6 +111,8 @@ class FrameInput {
   std::atomic<bool> link_up_{false};
   Sample latest_[kHands];
   bool have_sample_[kHands] = {false, false};
+  bool xf_valid_ = false;
+  double xf_q_[4] = {1, 0, 0, 0}, xf_p_[3] = {0, 0, 0};
   Device devices_[kHands];
 
   void Serve();
